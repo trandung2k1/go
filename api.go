@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"reflect"
+	"strings"
 
 	_ "github.com/denisenkom/go-mssqldb"
+	"github.com/go-playground/validator/v10"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -17,9 +20,9 @@ type User struct {
 	IsAdmin bool `json:"is_admin" form:"is_admin"`
 }
 type UserBody struct {
-	Email    string
-	Password string
-	IsAdmin  bool
+	Email    string `validate:"required,email"`
+	Password string `validate:"required"`
+	IsAdmin  bool   `validate:"omitempty"`
 }
 type APIServer struct {
 	addr string
@@ -37,6 +40,14 @@ func (s *APIServer) Run() error {
 		json.NewEncoder(w).Encode(map[string]any{"userId": userId, "status": 200})
 	})
 	router.HandleFunc("POST /users", func(w http.ResponseWriter, r *http.Request) {
+		validate := validator.New(validator.WithRequiredStructEnabled())
+		validate.RegisterTagNameFunc(func(fld reflect.StructField) string {
+			name := strings.SplitN(fld.Tag.Get("json"), ",", 2)[0]
+			if name == "-" {
+				return ""
+			}
+			return name
+		})
 		var user UserBody
 		var u User
 		err := json.NewDecoder(r.Body).Decode(&user)
@@ -44,6 +55,18 @@ func (s *APIServer) Run() error {
 			json.NewEncoder(w).Encode(map[string]any{"message": "INVALID BODY"})
 			return
 		}
+
+		if err := validate.Struct(user); err != nil {
+			var errors []string
+			for _, err := range err.(validator.ValidationErrors) {
+				errors = append(errors, err.Field()+": "+err.Tag())
+			}
+			errorResponse := map[string]interface{}{"errors": errors}
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(errorResponse)
+			return
+		}
+
 		oneRow, err := db.Query("select top 1 email from Users where email=@email", sql.Named("email", user.Email))
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]any{"message": "FIND ONE ERROR", "error": err.Error()})
@@ -55,17 +78,20 @@ func (s *APIServer) Run() error {
 		}
 		oneRow.Close()
 		if user.Email == email {
+			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]any{"message": "Email already exits"})
 			return
 		} else {
 			password := []byte(user.Password)
 			hashedPassword, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
 			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]any{"message": "HASHED PASSWORD ERROR"})
 				return
 			}
-			row, err := db.Query("INSERT INTO Users(email, password) VALUES (@email, @password);select ID = convert(bigint, SCOPE_IDENTITY())", sql.Named("email", user.Email), sql.Named("password", hashedPassword))
+			row, err := db.Query("INSERT INTO Users(email, password, isAdmin) VALUES (@email, @password, @isAdmin);select ID = convert(bigint, SCOPE_IDENTITY())", sql.Named("email", user.Email), sql.Named("password", hashedPassword), sql.Named("isAdmin", user.IsAdmin))
 			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]any{"message": "QUERY ERROR", "error": err.Error()})
 				return
 			}
@@ -75,6 +101,7 @@ func (s *APIServer) Run() error {
 			}
 			u.Id = int(lastInsertId)
 			u.Email = user.Email
+			u.IsAdmin = user.IsAdmin
 			row.Close()
 			json.NewEncoder(w).Encode(map[string]any{"user": u})
 		}
