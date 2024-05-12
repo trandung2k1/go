@@ -1,0 +1,16 @@
+CREATE DATABASE MYDATABASE
+
+GO 
+
+USE MYDATABASE
+
+GO
+
+CREATE TABLE Users (
+    id int IDENTITY(1,1) PRIMARY KEY,
+    email varchar(255) NOT NULL,
+    password varchar(255) NOT NULL,
+    isAdmin BIT NOT NULL DEFAULT 0
+)
+
+SELECT * FROM Users

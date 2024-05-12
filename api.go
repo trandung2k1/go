@@ -1,10 +1,26 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"log"
 	"net/http"
+
+	_ "github.com/denisenkom/go-mssqldb"
+	"golang.org/x/crypto/bcrypt"
 )
 
+type User struct {
+	Id    int    `json:"id" form:"id"`
+	Email string `json:"email" form:"email"`
+	// Password string `json:"password" form:"password"`
+	IsAdmin bool `json:"is_admin" form:"is_admin"`
+}
+type UserBody struct {
+	Email    string
+	Password string
+	IsAdmin  bool
+}
 type APIServer struct {
 	addr string
 }
@@ -14,31 +30,56 @@ func NewAPIServer(addr string) *APIServer {
 }
 
 func (s *APIServer) Run() error {
+	db, _ := sql.Open("sqlserver", "sqlserver://sa:123456789@localhost:1433?database=MYDATABASE&connection+timeout=30")
 	router := http.NewServeMux()
 	router.HandleFunc("GET /users/{userId}", func(w http.ResponseWriter, r *http.Request) {
 		userId := r.PathValue("userId")
-		w.Write([]byte("UserId : " + userId))
-
+		json.NewEncoder(w).Encode(map[string]any{"userId": userId, "status": 200})
 	})
-	router.HandleFunc("PUT /api/v1/users/{userId}", func(w http.ResponseWriter, r *http.Request) {
-		userId := r.PathValue("userId")
-		w.Write([]byte("UserId : " + userId))
-
+	router.HandleFunc("POST /users", func(w http.ResponseWriter, r *http.Request) {
+		var user UserBody
+		var u User
+		err := json.NewDecoder(r.Body).Decode(&user)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]any{"message": "INVALID BODY"})
+			return
+		}
+		oneRow, err := db.Query("select top 1 email from Users where email=@email", sql.Named("email", user.Email))
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]any{"message": "FIND ONE ERROR", "error": err.Error()})
+			return
+		}
+		var email string
+		for oneRow.Next() {
+			oneRow.Scan(&email)
+		}
+		oneRow.Close()
+		if user.Email == email {
+			json.NewEncoder(w).Encode(map[string]any{"message": "Email already exits"})
+			return
+		} else {
+			password := []byte(user.Password)
+			hashedPassword, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
+			if err != nil {
+				json.NewEncoder(w).Encode(map[string]any{"message": "HASHED PASSWORD ERROR"})
+				return
+			}
+			row, err := db.Query("INSERT INTO Users(email, password) VALUES (@email, @password);select ID = convert(bigint, SCOPE_IDENTITY())", sql.Named("email", user.Email), sql.Named("password", hashedPassword))
+			if err != nil {
+				json.NewEncoder(w).Encode(map[string]any{"message": "QUERY ERROR", "error": err.Error()})
+				return
+			}
+			var lastInsertId int64
+			for row.Next() {
+				row.Scan(&lastInsertId)
+			}
+			u.Id = int(lastInsertId)
+			u.Email = user.Email
+			row.Close()
+			json.NewEncoder(w).Encode(map[string]any{"user": u})
+		}
 	})
-
-	router.HandleFunc("GET /api/v1/users/{userId}", func(w http.ResponseWriter, r *http.Request) {
-		userId := r.PathValue("userId")
-		w.Write([]byte("UserId : " + userId))
-
-	})
-
-	v1 := http.NewServeMux()
-	v1.Handle("/api/v1/", http.StripPrefix("/api/v1", router))
-
-	// server := http.Server{Addr: s.addr,Handler: RequireAuthMiddleware(RequestLoggerMiddleware(router))}
-	middlewareChain := MiddlewareChain(RequestLoggerMiddleware, RequireAuthMiddleware)
-	// server := http.Server{Addr: s.addr, Handler: MiddlewareChain(RequestLoggerMiddleware, RequireAuthMiddleware)(router)}
-
+	middlewareChain := MiddlewareChain(RequestLoggerMiddleware)
 	server := http.Server{Addr: s.addr, Handler: middlewareChain(router)}
 	log.Printf("Server has started: %s", s.addr)
 	return server.ListenAndServe()
